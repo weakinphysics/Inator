@@ -1,0 +1,23 @@
+Command: cmake -G Ninja -B /home/cero-vengeance/EspressifIDE/workspace/Inator/build -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/home/cero-vengeance/.espressif/tools/python/v6.0/venv/bin/python -DESP_PLATFORM=1 -DCCACHE_ENABLE=False /home/cero-vengeance/EspressifIDE/workspace/Inator
+info: Default value for ESP_WIFI_SSID in sdkconfig is "myssid" but it is "HeadBentOver" according to Kconfig.
+Using default value from sdkconfig ("myssid").
+info: Default value for ESP_WIFI_PASSWORD in sdkconfig is "mypassword" but it is "ahorse" according to Kconfig.
+Using default value from sdkconfig ("mypassword").
+Configuration Report                                                            
+ ────────────────────────────────────────────────────────────────────────────── 
+   Parser Version: 1                                                            
+   Verbosity: default                                                           
+   Defaults policy: sdkconfig                                                   
+   Status: Finished with notifications                                          
+                                                                                
+  Default Value Mismatch                                                        
+   ──────────────────────────────────────────────────────────────────────────   
+    Using sdkconfig default values                                              
+    Config symbols with different default value between sdkconfig and           
+    Kconfig                                                                     
+    ESP_WIFI_PASSWORD: Kconfig default value: ahorse, sdkconfig default         
+    value: mypassword                                                           
+    ESP_WIFI_SSID: Kconfig default value: HeadBentOver, sdkconfig default       
+    value: myssid                                                               
+   ──────────────────────────────────────────────────────────────────────────   
+ ────────────────────────────────────────────────────────────────────────────── 

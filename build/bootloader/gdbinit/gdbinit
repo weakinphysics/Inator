@@ -1,0 +1,2 @@
+source /home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader/gdbinit/symbols
+source /home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader/gdbinit/connect

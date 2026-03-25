@@ -1,0 +1,43 @@
+{
+	"sources" : 
+	[
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/CMakeFiles/bootloader"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/CMakeFiles/bootloader.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/CMakeFiles/bootloader-complete.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule"
+		},
+		{
+			"file" : "/home/cero-vengeance/EspressifIDE/workspace/Inator/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule"
+		}
+	],
+	"target" : 
+	{
+		"labels" : 
+		[
+			"bootloader"
+		],
+		"name" : "bootloader"
+	}
+}

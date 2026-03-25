@@ -1,0 +1,9 @@
+Command: cmake -G Ninja -B /home/cero-vengeance/EspressifIDE/workspace/Inator/build -DPYTHON_DEPS_CHECKED=1 -DPYTHON=/home/cero-vengeance/.espressif/tools/python/v6.0/venv/bin/python -DESP_PLATFORM=1 -DCCACHE_ENABLE=False /home/cero-vengeance/EspressifIDE/workspace/Inator
+Configuration Report               
+ ───────────────────────────────── 
+   Parser Version: 1               
+   Verbosity: default              
+   Defaults policy: sdkconfig      
+   Status: Finished successfully   
+                                   
+ ───────────────────────────────── 
