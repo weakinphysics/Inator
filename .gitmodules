@@ -1,0 +1,3 @@
+[submodule "components/espp"]
+	path = components/espp
+	url = https://github.com/esp-cpp/espp
