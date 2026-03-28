@@ -1074,6 +1074,13 @@
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/ulp/CMakeFiles/install.dir
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/ulp/CMakeFiles/install/local.dir
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/ulp/CMakeFiles/install/strip.dir
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/CMakeFiles/__idf_espressif__esp-dsp.dir
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/CMakeFiles/edit_cache.dir
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/CMakeFiles/rebuild_cache.dir
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/CMakeFiles/list_install_components.dir
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/CMakeFiles/install.dir
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/CMakeFiles/install/local.dir
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/CMakeFiles/install/strip.dir
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/main/CMakeFiles/__idf_main.dir
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/main/CMakeFiles/edit_cache.dir
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/main/CMakeFiles/rebuild_cache.dir

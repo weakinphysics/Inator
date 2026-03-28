@@ -129,8 +129,14 @@ class NineAxis{
 
 	esp_err_t fetchAll(float &ax, float &ay, float &az, float &gx, float &gy, float &gz, float &mx, float &my, float &mz, bool getMags=false){
 		icm20948_status_e status = icm20948_data_ready(&imu);
+		if (status != ICM_20948_STAT_OK) {
+	        return ESP_ERR_INVALID_STATE;
+	    }
 		if (status == ICM_20948_STAT_OK){
 			status = icm20948_get_agmt(&imu, &agmt);
+			if (status != ICM_20948_STAT_OK) {
+		        return ESP_FAIL;
+		    }
 			printf("Get AGMT status %d\n", status);
 			ax = agmt.acc.axes.x / a2;
 			ay = agmt.acc.axes.y / a2;
@@ -143,8 +149,9 @@ class NineAxis{
 				my = agmt.mag.axes.y*0.15f;
 				mz = agmt.mag.axes.z*0.15f;
 			}
+			return ESP_OK;
 		}
-		return ESP_OK;
+		return ESP_FAIL;
 	}    
 
 };
@@ -448,6 +455,9 @@ class AHRS{
 	
 	// there probably is a way to implement this in a cleaner, more efficient manner! 
 	
+	
+	// fix the accel reliability when the vehicle is undergoing acceleration
+	
 	public:
 	IMUInterface imu;
 	std::vector <std::vector<double>> rotationMatrix;
@@ -513,9 +523,9 @@ class AHRS{
 		double angle = acos(acostarget);
 		double sinangle = sin(angle);
 		if(std::abs(sinangle) < 1e-7){
-			this->rotvec[0] = 0.0;
-			this->rotvec[1] = 0.0;
-			this->rotvec[2] = 0.0;
+			this->rotVecStorage[0] = 0.0;
+			this->rotVecStorage[1] = 0.0;
+			this->rotVecStorage[2] = 0.0;
 			return;
 		}
 		double a1 = ((rotation[0][1] - rotation[1][0])*0.5)/sinangle;
@@ -846,16 +856,16 @@ class StabilizeController{
 		double yaw_update = currentYaw + delta_t*yaw;
 		double omega_x, omega_y, omega_z; // errors 
 		this->ahorse->generateControlAttitude(roll, pitch, yaw_update, omega_x, omega_y, omega_z);
-		this->accError[0] += omega_x; this->accError[1] += omega_y; this->accError[2] += omega_z;
+		this->accError[0] += omega_x*delta_t; this->accError[1] += omega_y*delta_t; this->accError[2] += omega_z*delta_t;
 		
 		this->clipError();
 		if(!history){
 			history = true;
 			this->prevs[0] = omega_x; this->prevs[1] = omega_y; this->prevs[2] = omega_z;
 		}
-		double commanded_roll = omega_x*this->kps[0] + this->accError[0]*this->kis[0] + this->kds[0]*(omega_x - this->prevs[0]);;
-		double commanded_pitch = omega_y*this->kps[1] + this->accError[1]*this->kis[1] + this->kds[1]*(omega_y - this->prevs[1]);;
-		double commanded_yaw = omega_z*this->kps[2] + this->accError[2]*this->kis[2] + this->kds[2]*(omega_z - this->prevs[2]);;
+		double commanded_roll = omega_x*this->kps[0] + this->accError[0]*this->kis[0] + this->kds[0]*(omega_x - this->prevs[0])*delta_t;
+		double commanded_pitch = omega_y*this->kps[1] + this->accError[1]*this->kis[1] + this->kds[1]*(omega_y - this->prevs[1])*delta_t;
+		double commanded_yaw = omega_z*this->kps[2] + this->accError[2]*this->kis[2] + this->kds[2]*(omega_z - this->prevs[2])*delta_t;
 		
 		
 		this->prevs[0] = omega_x; this->prevs[1] = omega_y; this->prevs[2] = omega_z;
@@ -904,7 +914,7 @@ class StabilizeController{
 
 class RCInterface{
 	public:
-	crsf_channels_t rc = {{0}};
+	crsf_channels_t rc{};
 	int minPwms[5] = {10000, 10000, 10000, 10000, 10000};
 	int maxPwms[5] = {0,0,0,0,0};
 	int rcCenters[5] = {1500, 1500, 1500, 1500, 1500};

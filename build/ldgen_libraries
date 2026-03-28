@@ -193,6 +193,8 @@
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/perfmon/libperfmon.a
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/rt/librt.a
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/spiffs/libspiffs.a
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/libespressif__esp-dsp.a
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/main/libmain.a
+/home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/espressif__esp-dsp/libespressif__esp-dsp.a
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/icm20948/libicm20948.a
 /home/cero-vengeance/EspressifIDE/workspace/Inator/build/esp-idf/driver/libdriver.a

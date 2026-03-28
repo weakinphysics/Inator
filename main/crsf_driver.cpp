@@ -83,14 +83,16 @@ static void crsf_decode_channels_0x16(const uint8_t payload[22], uint16_t ch_out
 
 void crsf_init(void)
 {
-    const uart_config_t uart_config = {
-        .baud_rate = CRSF_BAUD,
-        .data_bits = UART_DATA_8_BITS,
-        .parity    = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
-    };
+	uart_config_t uart_config{};
+	uart_config.baud_rate = CRSF_BAUD;
+	uart_config.data_bits = UART_DATA_8_BITS;
+	uart_config.parity = UART_PARITY_DISABLE;
+	uart_config.stop_bits = UART_STOP_BITS_1;
+	uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+	uart_config.rx_flow_ctrl_thresh = 0;
+	uart_config.source_clk = UART_SCLK_DEFAULT;
+	uart_config.flags.backup_before_sleep = 0;
+	uart_config.flags.allow_pd = 0;
 
     ESP_ERROR_CHECK(uart_driver_install(CRSF_UART_NUM, 2048, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(CRSF_UART_NUM, &uart_config));
@@ -183,7 +185,7 @@ bool crsf_poll(crsf_channels_t *out)
         s_rx.buf[s_rx.idx++] = b;
 
         if (s_rx.expected_total > 0 && s_rx.idx == s_rx.expected_total) {
-            crsf_channels_t parsed = {0};
+            crsf_channels_t parsed{};
             if (crsf_try_parse_frame(s_rx.buf, s_rx.expected_total, &parsed)) {
                 *out = parsed;
                 got_channels = true;
