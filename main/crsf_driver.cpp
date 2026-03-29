@@ -147,56 +147,62 @@ static bool crsf_try_parse_frame(const uint8_t *frame, int total_len, crsf_chann
 
     return false;
 }
-
 bool crsf_poll(crsf_channels_t *out)
 {
     uint8_t tmp[128];
-    int n = uart_read_bytes(CRSF_UART_NUM, tmp, sizeof(tmp), 0);
-    if (n <= 0) {
-        return false;
-    }
-
     bool got_channels = false;
+    crsf_channels_t latest{};
 
-    for (int i = 0; i < n; i++) {
-        uint8_t b = tmp[i];
-
-        if (s_rx.idx == 0) {
-            // CRSF sync/device byte. For FC-facing stream this is typically 0xC8.
-            // Some implementations just treat first byte as address and continue.
-            s_rx.buf[s_rx.idx++] = b;
-            s_rx.expected_total = 0;
-            continue;
+    while (true) {
+        int n = uart_read_bytes(CRSF_UART_NUM, tmp, sizeof(tmp), 0);
+        if (n <= 0) {
+            break;   // UART drained
         }
 
-        if (s_rx.idx == 1) {
+        for (int i = 0; i < n; i++) {
+            uint8_t b = tmp[i];
+
+            if (s_rx.idx == 0) {
+                // better to sync only on plausible start byte
+                if (b != CRSF_ADDRESS_FLIGHT_CTRL && b != 0x00) {
+                    continue;
+                }
+                s_rx.buf[s_rx.idx++] = b;
+                s_rx.expected_total = 0;
+                continue;
+            }
+
+            if (s_rx.idx == 1) {
+                s_rx.buf[s_rx.idx++] = b;
+                s_rx.expected_total = 2 + b;
+
+                if (s_rx.expected_total < 5 || s_rx.expected_total > CRSF_MAX_FRAME_SIZE) {
+                    s_rx.idx = 0;
+                    s_rx.expected_total = 0;
+                }
+                continue;
+            }
+
             s_rx.buf[s_rx.idx++] = b;
 
-            // total bytes = 2 header bytes + length
-            s_rx.expected_total = 2 + b;
+            if (s_rx.expected_total > 0 && s_rx.idx == s_rx.expected_total) {
+                crsf_channels_t parsed{};
+                if (crsf_try_parse_frame(s_rx.buf, s_rx.expected_total, &parsed)) {
+                    latest = parsed;       // keep only newest valid frame
+                    got_channels = true;
+                }
 
-            if (s_rx.expected_total < 5 || s_rx.expected_total > CRSF_MAX_FRAME_SIZE) {
+                s_rx.idx = 0;
+                s_rx.expected_total = 0;
+            } else if (s_rx.idx >= CRSF_MAX_FRAME_SIZE) {
                 s_rx.idx = 0;
                 s_rx.expected_total = 0;
             }
-            continue;
         }
+    }
 
-        s_rx.buf[s_rx.idx++] = b;
-
-        if (s_rx.expected_total > 0 && s_rx.idx == s_rx.expected_total) {
-            crsf_channels_t parsed{};
-            if (crsf_try_parse_frame(s_rx.buf, s_rx.expected_total, &parsed)) {
-                *out = parsed;
-                got_channels = true;
-            }
-
-            s_rx.idx = 0;
-            s_rx.expected_total = 0;
-        } else if (s_rx.idx >= CRSF_MAX_FRAME_SIZE) {
-            s_rx.idx = 0;
-            s_rx.expected_total = 0;
-        }
+    if (got_channels) {
+        *out = latest;
     }
 
     return got_channels;

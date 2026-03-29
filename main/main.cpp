@@ -6,17 +6,17 @@
 #include <unistd.h>
 #include <vector>
 
+#include "driver/i2c_master.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/projdefs.h"
 #include "freertos/task.h"
-#include "driver/i2c.h"
 
 #include "hal/i2c_types.h"
 #include "hal/ledc_types.h"
-#include "icm20948_enumerations.h"
+//#include "icm20948_enumerations.h"
 #include "esp_check.h"
 #include <math.h>
 #include <array>
@@ -33,18 +33,28 @@
 
 
 // FLASH INTERFACE
+#include "soc/gpio_num.h"
 #include "store_config.h"
 
 
-extern "C" {
-	#include "icm20948.h"
-	#include "icm20948_i2c.h"
-}
+#include <system_error>
+
+#include <functional>
+
+
 
 #define I2C_MASTER_SCL_IO   22
 #define I2C_MASTER_SDA_IO   21
 #define I2C_MASTER_NUM      I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ  100000	
+
+
+
+static constexpr auto i2c_port = I2C_NUM_0;
+static constexpr auto i2c_clock_speed = I2C_MASTER_FREQ_HZ;
+static constexpr gpio_num_t i2c_scl = (gpio_num_t)I2C_MASTER_SCL_IO;
+static constexpr gpio_num_t i2c_sda = (gpio_num_t)I2C_MASTER_SDA_IO;
+static constexpr uint8_t imu_addr = 0x69; 
 
 
 ///// SCALES FOR ACCELS AND GYROS, COMMON TO BOTH IMUs
@@ -63,19 +73,57 @@ double PI = 3.1415926535897932384626433832;
 
 //////////////////////////////////////////////////////
 
-static void i2c_master_init()
-{
-    i2c_config_t conf = {};
-    conf.mode = I2C_MODE_MASTER;
-    conf.sda_io_num = (gpio_num_t)I2C_MASTER_SDA_IO;
-    conf.scl_io_num = (gpio_num_t)I2C_MASTER_SCL_IO;
-    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
-    conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
 
-    ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
-    ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
+//
+static esp_err_t icm20948_whoami_test_newapi() {
+    const uint8_t addr = 0x69;
+    const uint8_t reg  = 0x00;   // WHO_AM_I, bank 0
+    uint8_t who = 0;
+
+    i2c_master_bus_config_t bus_cfg = {};
+    bus_cfg.i2c_port = I2C_NUM_0;
+    bus_cfg.sda_io_num = GPIO_NUM_21;
+    bus_cfg.scl_io_num = GPIO_NUM_22;
+    bus_cfg.clk_source = I2C_CLK_SRC_DEFAULT;
+    bus_cfg.glitch_ignore_cnt = 7;
+    bus_cfg.flags.enable_internal_pullup = true;
+
+    i2c_master_bus_handle_t bus_handle = nullptr;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
+
+    i2c_device_config_t dev_cfg = {};
+    dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dev_cfg.device_address = addr;
+    dev_cfg.scl_speed_hz = 100000;
+
+    i2c_master_dev_handle_t dev_handle = nullptr;
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_handle));
+
+    esp_err_t err = i2c_master_transmit_receive(
+        dev_handle,
+        &reg, 1,
+        &who, 1,
+        100 / portTICK_PERIOD_MS
+    );
+
+    printf("combined read err=%s, WHO_AM_I=0x%02X\n", esp_err_to_name(err), who);
+
+    return err;
 }
+
+//static void i2c_master_init()
+//{
+//    i2c_config_t conf = {};
+//    conf.mode = I2C_MODE_MASTER;
+//    conf.sda_io_num = (gpio_num_t)I2C_MASTER_SDA_IO;
+//    conf.scl_io_num = (gpio_num_t)I2C_MASTER_SCL_IO;
+//    conf.sda_pullup_en = GPIO_PULLUP_ENABLE;
+//    conf.scl_pullup_en = GPIO_PULLUP_ENABLE;
+//    conf.master.clk_speed = I2C_MASTER_FREQ_HZ;
+//	conf.clk_flags = I2C_SCLK_SRC_FLAG_FOR_NOMAL;
+//    ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
+//    ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
+//}
 
 double clip(double input, double left,  double right){
 	input = std::max(input, left);
@@ -83,153 +131,388 @@ double clip(double input, double left,  double right){
 	return input;
 }
 
-class NineAxis{
-	public:
-	icm20948_device_t imu;
-	icm0948_config_i2c_t imu_config;
-	icm20948_agmt_t agmt;
-	
-	NineAxis(){
-		imu_config.i2c_port = I2C_MASTER_NUM;
-		imu_config.i2c_addr = 0x69;
-		icm20948_status_e status;
-	    icm20948_init_struct(&imu);
-		icm20948_init_i2c(&imu, &imu_config);
-		status = icm20948_check_id(&imu);
-		printf("check_id status = %d\n", status);
-		if (status != ICM_20948_STAT_OK) {
-	        printf("ICM20948 not found\n");
-	        return;
-	    }
-		// IMPORTANT: wake device
-	    status = icm20948_sleep(&imu, false);
-	    printf("sleep(false) status = %d\n", status);
-	    vTaskDelay(pdMS_TO_TICKS(50));
 
-	    // optional but good
-	    status = icm20948_set_clock_source(&imu, CLOCK_AUTO);
-	    printf("set_clock_source status = %d\n", status);
-	    status = icm20948_set_sample_mode(
-	        &imu,
-	        (icm20948_internal_sensor_id_bm)(ICM_20948_INTERNAL_ACC | ICM_20948_INTERNAL_GYR),
-	        SAMPLE_MODE_CONTINUOUS
-	    );
-	    printf("set_sample_mode status = %d\n", status);
-	    icm20948_fss_t fss = {};
-	    fss.a = GPM_2;
-	    fss.g = DPS_250;
-	    status = icm20948_set_full_scale(
-	        &imu,
-	        (icm20948_internal_sensor_id_bm)(ICM_20948_INTERNAL_ACC | ICM_20948_INTERNAL_GYR),
-	        fss
-	    );
-	    printf("set_full_scale status = %d\n", status);
+
+
+class ICM20948 {
+public:
+    struct ImuData {
+        float ax_g, ay_g, az_g;
+        float gx_dps, gy_dps, gz_dps;
+        float mx_uT, my_uT, mz_uT;
+        bool mag_valid;
+    };
+
+    explicit ICM20948(i2c_master_dev_handle_t dev) : dev_(dev) {}
+
+    esp_err_t init() {
+        uint8_t who = 0;
+        ESP_RETURN_ON_ERROR(read_reg(REG_BANK0, REG_WHO_AM_I, &who, 1), TAG, "WHO_AM_I read failed");
+        ESP_LOGI(TAG, "ICM20948 WHO_AM_I = 0x%02X", who);
+        if (who != 0xEA) {
+            ESP_LOGE(TAG, "Unexpected WHO_AM_I");
+            return ESP_FAIL;
+        }
+
+        // device reset
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK0, REG_PWR_MGMT_1, 0x80), TAG, "reset failed");
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // clock auto select, wake up
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK0, REG_PWR_MGMT_1, 0x01), TAG, "wake failed");
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // enable accel + gyro
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK0, REG_PWR_MGMT_2, 0x00), TAG, "pwr mgmt2 failed");
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // gyro ±250 dps
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK2, REG_GYRO_CONFIG_1, 0x00), TAG, "gyro cfg failed");
+
+        // accel ±2g
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK2, REG_ACCEL_CONFIG, 0x00), TAG, "accel cfg failed");
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // enable internal i2c master
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK0, REG_USER_CTRL, 0x20), TAG, "enable i2c master failed");
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // pulse internal i2c master reset
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK0, REG_USER_CTRL, 0x22), TAG, "i2c master reset failed");
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // leave only i2c master enabled
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK0, REG_USER_CTRL, 0x20), TAG, "re-enable i2c master failed");
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // internal master clock
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_MST_CTRL, 0x07), TAG, "mst ctrl failed");
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // reset AK09916
+        ESP_RETURN_ON_ERROR(ak_write(AK09916_REG_CNTL3, 0x01), TAG, "mag reset failed");
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        // identity read
+        uint8_t wia1 = 0, wia2 = 0;
+        ESP_RETURN_ON_ERROR(ak_read_byte(AK09916_REG_WIA1, wia1), TAG, "mag WIA1 failed");
+        ESP_RETURN_ON_ERROR(ak_read_byte(AK09916_REG_WIA2, wia2), TAG, "mag WIA2 failed");
+        ESP_LOGI(TAG, "AK09916 WIA1=0x%02X WIA2=0x%02X", wia1, wia2);
+
+        if (wia1 != 0x48 || wia2 != 0x09) {
+            ESP_LOGE(TAG, "Unexpected AK09916 identity");
+            return ESP_FAIL;
+        }
+
+        // continuous mode 100 Hz
+        ESP_RETURN_ON_ERROR(ak_write(AK09916_REG_CNTL2, 0x08), TAG, "mag mode set failed");
+        vTaskDelay(pdMS_TO_TICKS(20));
+
+        // configure SLV0 auto-fetch into EXT_SENS_DATA
+        ESP_RETURN_ON_ERROR(configure_mag_continuous_read(), TAG, "mag continuous read config failed");
+        vTaskDelay(pdMS_TO_TICKS(20));
+
+        initialized_ = true;
+        return ESP_OK;
+    }
+
+    esp_err_t read_all(ImuData &out) {
+        if (!initialized_) return ESP_ERR_INVALID_STATE;
+
+        // accel + gyro burst
+        uint8_t buf[12] = {0};
+        ESP_RETURN_ON_ERROR(read_reg(REG_BANK0, REG_ACCEL_XOUT_H, buf, 12), TAG, "accel/gyro burst failed");
+
+        int16_t ax = (int16_t)((buf[0]  << 8) | buf[1]);
+        int16_t ay = (int16_t)((buf[2]  << 8) | buf[3]);
+        int16_t az = (int16_t)((buf[4]  << 8) | buf[5]);
+        int16_t gx = (int16_t)((buf[6]  << 8) | buf[7]);
+        int16_t gy = (int16_t)((buf[8]  << 8) | buf[9]);
+        int16_t gz = (int16_t)((buf[10] << 8) | buf[11]);
+
+        out.ax_g   = (float)ax / 16384.0f;
+        out.ay_g   = (float)ay / 16384.0f;
+        out.az_g   = (float)az / 16384.0f;
+        out.gx_dps = (float)gx / 131.0f;
+        out.gy_dps = (float)gy / 131.0f;
+        out.gz_dps = (float)gz / 131.0f;
+
+		// First debug path: read EXT_SENS_DATA
+	    uint8_t mbuf[9] = {0};
+	    ESP_RETURN_ON_ERROR(read_reg(REG_BANK0, REG_EXT_SENS_DATA_00, mbuf, 9), TAG, "mag ext sens read failed");
+
+//	    printf("EXT:");
+//	    for (int i = 0; i < 9; i++) printf(" %02X", mbuf[i]);
+//	    printf("\n");
+//
+//	    // Second debug path: direct SLV4 read
+//	    int16_t mx_dbg = 0, my_dbg = 0, mz_dbg = 0;
+//	    uint8_t st1_dbg = 0, st2_dbg = 0;
+//	    esp_err_t dbg_err = ak_read_mag_once(mx_dbg, my_dbg, mz_dbg, st1_dbg, st2_dbg);
+//	    if (dbg_err == ESP_OK) {
+//	        printf("SLV4 MAG: st1=0x%02X mx=%d my=%d mz=%d st2=0x%02X\n",
+//	               st1_dbg, mx_dbg, my_dbg, mz_dbg, st2_dbg);
+//	    } else {
+//	        printf("SLV4 MAG read failed: %s\n", esp_err_to_name(dbg_err));
+//	    }
+
+        // layout: ST1, HXL, HXH, HYL, HYH, HZL, HZH, TMPS, ST2
+		uint8_t st1 = mbuf[0];
+		uint8_t st2 = mbuf[8];
+
+		int16_t mx = (int16_t)((mbuf[2] << 8) | mbuf[1]);
+		int16_t my = (int16_t)((mbuf[4] << 8) | mbuf[3]);
+		int16_t mz = (int16_t)((mbuf[6] << 8) | mbuf[5]);
+
+		out.mx_uT = (float)mx * 0.15f;
+		out.my_uT = (float)my * 0.15f;
+		out.mz_uT = (float)mz * 0.15f;
+
+		// overflow bit only
+		out.mag_valid = ((st2 & 0x08) == 0);
+        return ESP_OK;
+    }
+	
+	
+	esp_err_t ak_read_mag_once(int16_t &mx, int16_t &my, int16_t &mz, uint8_t &st1, uint8_t &st2) {
+	    uint8_t b[8] = {0};
+
+	    ESP_RETURN_ON_ERROR(ak_read_byte(AK09916_REG_ST1, st1), TAG, "read ST1 failed");
+	    if (!(st1 & 0x01)) {
+	        mx = my = mz = 0;
+	        st2 = 0;
+	        return ESP_OK;
+	    }
+
+	    for (int i = 0; i < 6; i++) {
+	        ESP_RETURN_ON_ERROR(ak_read_byte(AK09916_REG_HXL + i, b[i]), TAG, "read mag byte failed");
+	    }
+	    ESP_RETURN_ON_ERROR(ak_read_byte(0x18, st2), TAG, "read ST2 failed");
+
+	    mx = (int16_t)((b[1] << 8) | b[0]);
+	    my = (int16_t)((b[3] << 8) | b[2]);
+	    mz = (int16_t)((b[5] << 8) | b[4]);
+	    return ESP_OK;
 	}
 	
+private:
+    static constexpr const char *TAG = "ICM20948";
+    static constexpr int TIMEOUT_MS = 100;
 
-	esp_err_t fetchAll(float &ax, float &ay, float &az, float &gx, float &gy, float &gz, float &mx, float &my, float &mz, bool getMags=false){
-		icm20948_status_e status = icm20948_data_ready(&imu);
-		if (status != ICM_20948_STAT_OK) {
-	        return ESP_ERR_INVALID_STATE;
-	    }
-		if (status == ICM_20948_STAT_OK){
-			status = icm20948_get_agmt(&imu, &agmt);
-			if (status != ICM_20948_STAT_OK) {
-		        return ESP_FAIL;
-		    }
-			printf("Get AGMT status %d\n", status);
-			ax = agmt.acc.axes.x / a2;
-			ay = agmt.acc.axes.y / a2;
-			az = agmt.acc.axes.z / a2;
-			gx = agmt.gyr.axes.x / g250;
-			gy = agmt.gyr.axes.y / g250;
-			gz = agmt.gyr.axes.z / g250;
-			if(getMags){
-				mx = agmt.mag.axes.x*0.15f;
-				my = agmt.mag.axes.y*0.15f;
-				mz = agmt.mag.axes.z*0.15f;
-			}
-			return ESP_OK;
-		}
-		return ESP_FAIL;
-	}    
+    // bank select
+    static constexpr uint8_t REG_BANK_SEL = 0x7F;
+    static constexpr uint8_t REG_BANK0 = 0x00;
+    static constexpr uint8_t REG_BANK1 = 0x10;
+    static constexpr uint8_t REG_BANK2 = 0x20;
+    static constexpr uint8_t REG_BANK3 = 0x30;
 
+	
+    // bank 0
+    static constexpr uint8_t REG_WHO_AM_I         = 0x00;
+    static constexpr uint8_t REG_USER_CTRL        = 0x03;
+    static constexpr uint8_t REG_PWR_MGMT_1       = 0x06;
+    static constexpr uint8_t REG_PWR_MGMT_2       = 0x07;
+    static constexpr uint8_t REG_ACCEL_XOUT_H     = 0x2D;
+    static constexpr uint8_t REG_EXT_SENS_DATA_00 = 0x3B;
+
+    // bank 2
+    static constexpr uint8_t REG_GYRO_CONFIG_1    = 0x01;
+    static constexpr uint8_t REG_ACCEL_CONFIG     = 0x14;
+
+    // bank 3
+    static constexpr uint8_t REG_I2C_MST_CTRL     = 0x01;
+    static constexpr uint8_t REG_I2C_SLV0_ADDR    = 0x03;
+    static constexpr uint8_t REG_I2C_SLV0_REG     = 0x04;
+    static constexpr uint8_t REG_I2C_SLV0_CTRL    = 0x05;
+
+    static constexpr uint8_t REG_I2C_SLV4_ADDR    = 0x13;
+    static constexpr uint8_t REG_I2C_SLV4_REG     = 0x14;
+    static constexpr uint8_t REG_I2C_SLV4_CTRL    = 0x15;
+    static constexpr uint8_t REG_I2C_SLV4_DO      = 0x16;
+    static constexpr uint8_t REG_I2C_SLV4_DI      = 0x17;
+
+    // AK09916
+    static constexpr uint8_t AK09916_I2C_ADDR     = 0x0C;
+    static constexpr uint8_t AK09916_REG_WIA1     = 0x00;
+    static constexpr uint8_t AK09916_REG_WIA2     = 0x01;
+    static constexpr uint8_t AK09916_REG_ST1      = 0x10;
+    static constexpr uint8_t AK09916_REG_CNTL2    = 0x31;
+    static constexpr uint8_t AK09916_REG_CNTL3    = 0x32;
+	static constexpr uint8_t AK09916_REG_HXL = 0x11;
+	
+    i2c_master_dev_handle_t dev_ = nullptr;
+    bool initialized_ = false;
+    uint8_t current_bank_ = 0xFF;
+
+    esp_err_t set_bank(uint8_t bank) {
+        if (current_bank_ == bank) return ESP_OK;
+        uint8_t payload[2] = {REG_BANK_SEL, bank};
+        esp_err_t err = i2c_master_transmit(dev_, payload, sizeof(payload), TIMEOUT_MS);
+        if (err == ESP_OK) current_bank_ = bank;
+        return err;
+    }
+
+    esp_err_t write_reg(uint8_t bank, uint8_t reg, uint8_t value) {
+        ESP_RETURN_ON_ERROR(set_bank(bank), TAG, "set bank failed");
+        uint8_t payload[2] = {reg, value};
+        return i2c_master_transmit(dev_, payload, sizeof(payload), TIMEOUT_MS);
+    }
+
+    esp_err_t read_reg(uint8_t bank, uint8_t reg, uint8_t *data, size_t len) {
+        ESP_RETURN_ON_ERROR(set_bank(bank), TAG, "set bank failed");
+        return i2c_master_transmit_receive(dev_, &reg, 1, data, len, TIMEOUT_MS);
+    }
+
+    esp_err_t ak_write(uint8_t reg, uint8_t value) {
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV4_ADDR, AK09916_I2C_ADDR), TAG, "slv4 addr write failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV4_REG, reg), TAG, "slv4 reg write failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV4_DO, value), TAG, "slv4 do write failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV4_CTRL, 0x80), TAG, "slv4 ctrl write failed");
+
+        // crude but robust enough for now
+        vTaskDelay(pdMS_TO_TICKS(20));
+        return ESP_OK;
+    }
+
+    esp_err_t ak_read_byte(uint8_t reg, uint8_t &value) {
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV4_ADDR, 0x80 | AK09916_I2C_ADDR), TAG, "slv4 addr read failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV4_REG, reg), TAG, "slv4 reg set failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV4_CTRL, 0x80), TAG, "slv4 ctrl start failed");
+
+        // crude but robust enough for now
+        vTaskDelay(pdMS_TO_TICKS(20));
+
+        ESP_RETURN_ON_ERROR(read_reg(REG_BANK3, REG_I2C_SLV4_DI, &value, 1), TAG, "slv4 di read failed");
+        return ESP_OK;
+    }
+
+    esp_err_t configure_mag_continuous_read() {
+        // fetch ST1 + HXL..HZH + TMPS + ST2 into EXT_SENS_DATA_00..08
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV0_ADDR, 0x80 | AK09916_I2C_ADDR), TAG, "slv0 addr failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV0_REG, AK09916_REG_ST1), TAG, "slv0 reg failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_BANK3, REG_I2C_SLV0_CTRL, 0x80 | 0x09), TAG, "slv0 ctrl failed");
+        return ESP_OK;
+    }
+};
+
+
+class NineAxis {
+public:
+    ICM20948 imu;
+    bool initialized = false;
+
+    explicit NineAxis(i2c_master_dev_handle_t dev)
+        : imu(dev)
+    {
+        esp_err_t err = imu.init();
+        if (err != ESP_OK) {
+            printf("ICM20948 init failed: %s\n", esp_err_to_name(err));
+            initialized = false;
+        } else {
+            printf("ICM20948 initialized successfully\n");
+            initialized = true;
+        }
+    }
+
+    esp_err_t fetchAll(float &ax, float &ay, float &az,
+                       float &gx, float &gy, float &gz,
+                       float &mx, float &my, float &mz,
+                       bool getMags = false)
+    {
+        if (!initialized) return ESP_ERR_INVALID_STATE;
+
+        ICM20948::ImuData data;
+        esp_err_t err = imu.read_all(data);
+        if (err != ESP_OK) {
+            printf("ICM20948 read failed: %s\n", esp_err_to_name(err));
+            return err;
+        }
+
+        // keep your old sign convention
+        ax = -data.ax_g;
+        ay = -data.ay_g;
+        az =  data.az_g;
+
+        gx = -data.gx_dps;
+        gy = -data.gy_dps;
+        gz =  data.gz_dps;
+
+        if (getMags) {
+            mx =  data.mx_uT;
+            my = -data.my_uT;
+            mz =  data.mz_uT;
+
+            if (!data.mag_valid) {
+                return ESP_ERR_INVALID_RESPONSE;
+            }
+        }
+
+        return ESP_OK;
+    }
 };
 
 
 
+class MPU6500 {
+public:
+    static constexpr uint8_t ADDR_LOW  = 0x68;
+    static constexpr uint8_t ADDR_HIGH = 0x69;
 
+    static constexpr uint8_t REG_SMPLRT_DIV    = 0x19;
+    static constexpr uint8_t REG_CONFIG        = 0x1A;
+    static constexpr uint8_t REG_GYRO_CONFIG   = 0x1B;
+    static constexpr uint8_t REG_ACCEL_CONFIG  = 0x1C;
+    static constexpr uint8_t REG_ACCEL_CONFIG2 = 0x1D;
+    static constexpr uint8_t REG_ACCEL_XOUT_H  = 0x3B;
+    static constexpr uint8_t REG_PWR_MGMT1     = 0x6B;
+    static constexpr uint8_t REG_PWR_MGMT2     = 0x6C;
+    static constexpr uint8_t REG_WHO_AM_I      = 0x75;
 
+    explicit MPU6500(i2c_master_dev_handle_t dev) : dev_(dev) {}
 
-
-class MPU6500{
-	public:
-	static constexpr uint8_t ADDR_LOW = 0x68;
-	static constexpr uint8_t ADDR_HIGH = 0x69;
-	static constexpr uint8_t REG_SMPLRT_DIV = 0x19;
-	static constexpr uint8_t REG_CONFIG = 0x1A;
-	static constexpr uint8_t REG_GYRO_CONFIG = 0x1B;
-	static constexpr uint8_t REG_ACCEL_CONFIG = 0x1C;
-	static constexpr uint8_t REG_ACCEL_CONFIG2 = 0x1D;
-	static constexpr uint8_t REG_ACCEL_XOUT_H= 0x3B;
-	static constexpr uint8_t REG_ACCEL_XOUT_L = 0x43;
-	static constexpr uint8_t REG_PWR_MGMT1 = 0x6B;
-	static constexpr uint8_t REG_PWR_MGMT2 = 0x6C;
-	static constexpr uint8_t REG_WHO_AM_I= 0x70;
-	
-	i2c_port_t port{};
-	uint8_t addr{ADDR_LOW};
-	
-	
-	
-	esp_err_t init(i2c_port_t i2c_port, uint8_t i2c_addr) {
-        port = i2c_port;
-        addr = i2c_addr;
-
+    esp_err_t init() {
         uint8_t who = 0;
-        ESP_RETURN_ON_ERROR(read_reg(REG_WHO_AM_I, &who, 1), "MPU6500", "WHO_AM_I read failed");
+        ESP_RETURN_ON_ERROR(read_reg(REG_WHO_AM_I, &who, 1), TAG, "WHO_AM_I read failed");
         printf("MPU6500 WHO_AM_I = 0x%02X\n", who);
 
         if (who != 0x70) {
             printf("Unexpected WHO_AM_I\n");
+            return ESP_FAIL;
         }
 
-        // Wake up, use PLL with X gyro as clock source.
-        ESP_RETURN_ON_ERROR(write_reg(this->REG_PWR_MGMT1, 0x01), "MPU6500", "wake failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_PWR_MGMT1, 0x01), TAG, "wake failed");
         vTaskDelay(pdMS_TO_TICKS(50));
 
-        // Enable accel + gyro on all axes.
-        ESP_RETURN_ON_ERROR(write_reg(this->REG_PWR_MGMT2, 0x00), "MPU6500", "PWR_MGMT_2 failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_PWR_MGMT2, 0x00), TAG, "PWR_MGMT2 failed");
+        ESP_RETURN_ON_ERROR(write_reg(REG_CONFIG, 0x03), TAG, "CONFIG failed");
 
-        // DLPF config. Mild filtering.
-        ESP_RETURN_ON_ERROR(write_reg(this->REG_CONFIG, 0x03), "MPU6500", "CONFIG failed");
+        // ±250 dps
+        ESP_RETURN_ON_ERROR(write_reg(REG_GYRO_CONFIG, 0x00), TAG, "GYRO_CONFIG failed");
 
-        // Gyro full scale = ±250 dps
-        ESP_RETURN_ON_ERROR(write_reg(this->REG_GYRO_CONFIG, 0x00), "MPU6500", "GYRO_CONFIG failed");
+        // ±2 g
+        ESP_RETURN_ON_ERROR(write_reg(REG_ACCEL_CONFIG, 0x00), TAG, "ACCEL_CONFIG failed");
 
-        // Accel full scale = ±2 g
-        ESP_RETURN_ON_ERROR(write_reg(this->REG_ACCEL_CONFIG, 0x00), "MPU6500", "ACCEL_CONFIG failed");
+        // accel DLPF config
+        ESP_RETURN_ON_ERROR(write_reg(REG_ACCEL_CONFIG2, 0x03), TAG, "ACCEL_CONFIG2 failed");
 
-        // Accel DLPF on, moderate bandwidth
-        ESP_RETURN_ON_ERROR(write_reg(this->REG_ACCEL_CONFIG2, 0x03), "MPU6500", "ACCEL_CONFIG2 failed");
-
-        // Sample rate divider
-        ESP_RETURN_ON_ERROR(write_reg(this->REG_SMPLRT_DIV, 0x04), "MPU6500", "SMPLRT_DIV failed");
+        // sample divider
+        ESP_RETURN_ON_ERROR(write_reg(REG_SMPLRT_DIV, 0x04), TAG, "SMPLRT_DIV failed");
 
         vTaskDelay(pdMS_TO_TICKS(50));
+        initialized_ = true;
         return ESP_OK;
     }
 
-    esp_err_t read_accel_gyro_raw(int16_t& ax, int16_t& ay, int16_t& az,
-                                  int16_t& gx, int16_t& gy, int16_t& gz) {
+    esp_err_t read_accel_gyro_raw(int16_t &ax, int16_t &ay, int16_t &az,
+                                  int16_t &gx, int16_t &gy, int16_t &gz) {
+        if (!initialized_) return ESP_ERR_INVALID_STATE;
+
         uint8_t buf[14] = {0};
-        ESP_RETURN_ON_ERROR(read_reg(REG_ACCEL_XOUT_H, buf, 14), "MPU6500", "burst read failed");
+        ESP_RETURN_ON_ERROR(read_reg(REG_ACCEL_XOUT_H, buf, 14), TAG, "burst read failed");
 
         ax = (int16_t)((buf[0]  << 8) | buf[1]);
         ay = (int16_t)((buf[2]  << 8) | buf[3]);
         az = (int16_t)((buf[4]  << 8) | buf[5]);
-
-        // buf[6], buf[7] are temperature
 
         gx = (int16_t)((buf[8]  << 8) | buf[9]);
         gy = (int16_t)((buf[10] << 8) | buf[11]);
@@ -238,32 +521,39 @@ class MPU6500{
         return ESP_OK;
     }
 
-    esp_err_t fetchAll(float& ax_g, float& ay_g, float& az_g,
-                              float& gx_dps, float& gy_dps, float& gz_dps) {
+    esp_err_t fetchAll(float &ax_g, float &ay_g, float &az_g,
+                       float &gx_dps, float &gy_dps, float &gz_dps) {
         int16_t ax, ay, az, gx, gy, gz;
-        ESP_RETURN_ON_ERROR(read_accel_gyro_raw(ax, ay, az, gx, gy, gz), "MPU6500", "raw read failed");
-        // for ±2g and ±250 dps
-        ax_g   = ax / a2;
-        ay_g   = ay / a2;
-        az_g   = az / a2;
-        gx_dps = gx / g250;
-        gy_dps = gy / g250;
-        gz_dps = gz / g250;
-		
+        ESP_RETURN_ON_ERROR(read_accel_gyro_raw(ax, ay, az, gx, gy, gz), TAG, "raw read failed");
+
+        ax_g   = static_cast<float>(ax) / 16384.0f; // ±2g
+        ay_g   = static_cast<float>(ay) / 16384.0f;
+        az_g   = static_cast<float>(az) / 16384.0f;
+
+        gx_dps = static_cast<float>(gx) / 131.0f;   // ±250 dps
+        gy_dps = static_cast<float>(gy) / 131.0f;
+        gz_dps = static_cast<float>(gz) / 131.0f;
+
         return ESP_OK;
     }
 
 private:
+    static constexpr const char *TAG = "MPU6500";
+    static constexpr int TIMEOUT_MS = 100;
+
+    i2c_master_dev_handle_t dev_ = nullptr;
+    bool initialized_ = false;
+
     esp_err_t write_reg(uint8_t reg, uint8_t value) {
-        uint8_t data[2] = {reg, value};
-        return i2c_master_write_to_device(port, addr, data, 2, pdMS_TO_TICKS(100));
+        uint8_t payload[2] = {reg, value};
+        return i2c_master_transmit(dev_, payload, sizeof(payload), TIMEOUT_MS);
     }
 
-    esp_err_t read_reg(uint8_t reg, uint8_t* data, size_t len) {
-        return i2c_master_write_read_device(port, addr, &reg, 1, data, len, pdMS_TO_TICKS(100));
+    esp_err_t read_reg(uint8_t reg, uint8_t *data, size_t len) {
+        return i2c_master_transmit_receive(dev_, &reg, 1, data, len, TIMEOUT_MS);
     }
-
 };
+
 
 
 
@@ -282,9 +572,10 @@ public:
 	
 	MPU6500 imu1;
 	NineAxis imu2;
-	IMUInterface(){
+	IMUInterface(i2c_master_dev_handle_t  i1, i2c_master_dev_handle_t  i2): imu1(i1), imu2(i2)
+	{
 		// this is a constructor 
-		printf("break bread with the enemy?");
+		printf("break bread with the enemy?\n");
 		this->accels = {0.0, 0.0, 0.0};
 		this->gyros = {0.0, 0.0, 0.0};
 		this->mags = {0.0, 0.0, 0.0};
@@ -293,14 +584,14 @@ public:
 		this->accelScale.resize(2, std::vector<double>(3, 1.0));
 		this->magScale2.resize(3, 1.0);
 		this->magBias2.resize(3, 0);		
-		imu1.init(I2C_MASTER_NUM, 0x68);
+		imu1.init();
 		
 	}
 	
 	void calibrateAccelGyro(int which_imu){
 		// for now this will print to the console at the beginning of every phase
-		printf("Starting Accel Calibration, place the device z up");
-		vTaskDelay(pdMS_TO_TICKS(5000));
+		printf("Starting Accel Calibration, place the device z up\n");
+		vTaskDelay(pdMS_TO_TICKS(8000));
 		float ax, ay, az, gx, gy, gz, mx, my, mz;
 		float accelsd1[3] = {0.0, 0.0, 0.0};
 		float accelsd2[3] = {0.0, 0.0, 0.0};
@@ -311,8 +602,8 @@ public:
 			accelsd1[0] += az;
 		}
 		accelsd1[0] /= 1000.0;
-		printf("Place the device z down");
-		vTaskDelay(pdMS_TO_TICKS(5000));
+		printf("Place the device z down\n");
+		vTaskDelay(pdMS_TO_TICKS(8000));
 		for(int i = 0; i < 1000; i++){
 			esp_err_t e;
 			if(which_imu == 0) e = imu1.fetchAll(ax, ay, az, gx, gy, gz);
@@ -324,7 +615,8 @@ public:
 		this->accelScale[which_imu][0]= (accelsd1[0] - accelsd2[0])/2.0;
 			
 		//////
-		printf("Place the device y up");
+		printf("Place the device y up\n");
+		vTaskDelay(pdMS_TO_TICKS(8000));
 		for(int i = 0; i < 1000; i++){	
 			esp_err_t e;
 			if(which_imu == 0) e = imu1.fetchAll(ax, ay, az, gx, gy, gz);
@@ -332,8 +624,8 @@ public:
 			accelsd1[1] += ay;
 		}
 		accelsd1[1] /= 1000.0;
-		printf("Place the device y down");
-		vTaskDelay(pdMS_TO_TICKS(5000));
+		printf("Place the device y down\n");
+		vTaskDelay(pdMS_TO_TICKS(8000));
 		for(int i = 0; i < 1000; i++){
 			esp_err_t e;
 			if(which_imu == 0) e = imu1.fetchAll(ax, ay, az, gx, gy, gz);
@@ -346,7 +638,8 @@ public:
 		
 		//////
 		
-		printf("Place the device x up");
+		printf("Place the device x up\n");
+		vTaskDelay(pdMS_TO_TICKS(8000));
 		for(int i = 0; i < 1000; i++){	
 			esp_err_t e;
 			if(which_imu == 0) e = imu1.fetchAll(ax, ay, az, gx, gy, gz);
@@ -354,8 +647,8 @@ public:
 			accelsd1[2] += ax;
 		}
 		accelsd1[2] /= 1000.0;
-		printf("Place the device x down");
-		vTaskDelay(pdMS_TO_TICKS(5000));
+		printf("Place the device x down\n");
+		vTaskDelay(pdMS_TO_TICKS(8000));
 		for(int i = 0; i < 1000; i++){
 			esp_err_t e;
 			if(which_imu == 0) e = imu1.fetchAll(ax, ay, az, gx, gy, gz);
@@ -368,8 +661,8 @@ public:
 		
 		
 		// gyro cal 
-		printf("Place the device level and z up to calibrate Gyros");
-		vTaskDelay(pdMS_TO_TICKS(5000));
+		printf("Place the device level and z up to calibrate Gyros\n");
+		vTaskDelay(pdMS_TO_TICKS(8000));
 		float g1 = 0.0; float g2 = 0.0; float g3 = 0.0;
 		for(int i = 0; i < 1000; i++){
 			esp_err_t e;
@@ -385,7 +678,7 @@ public:
 	
 	void calibrateMag(){
 		// this has to be imu 2
-		printf("Calibrating mags, keep moving !");
+		printf("Calibrating mags, keep moving !\n");
 		int64_t start_time_us = esp_timer_get_time();
 		float ax, ay, az, gx, gy, gz, mx, my, mz;
 		float max_x = -1e6, min_x = 1e6, max_y = -1e6, min_y = 1e6, max_z = -1e6, min_z = 1e6;
@@ -410,6 +703,15 @@ public:
 	}
 	
 
+	void testComms(float &ax, float &ay, float &az, float &gx, float &gy, float &gz, float &mx, float &my, float &mz, int which_imu = 1){
+		if(which_imu == 0){
+			esp_err_t e = imu1.fetchAll(ax, ay, az, gx, gy, gz);
+		}
+		else{
+			esp_err_t e = imu2.fetchAll(ax, ay, az, gx, gy, gz, mx, my, mz, true);
+		}
+		return;
+	}
 	
 	
 	void fetchData(bool accel = true, bool gyro = true, bool mags = false){
@@ -450,7 +752,6 @@ public:
 };
 
 
-
 class AHRS{
 	
 	// there probably is a way to implement this in a cleaner, more efficient manner! 
@@ -477,12 +778,13 @@ class AHRS{
 	bool imus_need_calibration = false;
 	// data 
 
-	AHRS(){
-		this->cache.resize(1000, 0.0);
+	AHRS(i2c_master_dev_handle_t  i1, i2c_master_dev_handle_t  i2):
+	imu(i1, i2)
+	{
 		this->rotationMatrix = {{1.0, 0.0, 0.0},{0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
 		this->quaternion = {0.0, 0.0, 0.0, 0.0};
-		this->rotvec = {0.0, 0.0, 0.0, 0.0};
-		this->initialMagneticVector = {0.0, 0.0, 0.0, 0.0};
+		this->rotvec = {0.0, 0.0, 0.0};
+		this->initialMagneticVector = {0.0, 0.0, 0.0};
 		(this->hatTarget).resize(3, std::vector<double> (3, 0.0));
 		(this->hatInput).resize(3, 0.0);
 		(this->eulerAngles).resize(3, 0.0);
@@ -492,6 +794,23 @@ class AHRS{
 		}
 	}
 	
+	void printCalibration(){
+		printf("Printing Accel Scales: \n");
+		for(auto it: (this->imu).accelScale){
+			printf("%f %f %f\n", it[0], it[1], it[2]);
+		}
+		printf("Printing Accel Bias: \n");
+		for(auto it: (this->imu).accelBias){
+			printf("%f %f %f\n", it[0], it[1], it[2]);
+		}
+		printf("Printing Gyro Bias: \n");
+		for(auto it: (this->imu).gyroBias){
+			printf("%f %f %f\n", it[0], it[1], it[2]);
+		}
+		printf("Printing Mag Bias and then Scale:\n");
+		printf("%f %f %f\n", (this->imu).magBias2[0], (this->imu).magBias2[1], (this->imu).magBias2[2]);
+		printf("%f %f %f\n", (this->imu).magScale2[0], (this->imu).magScale2[1], (this->imu).magScale2[2]);
+	}
 	
 	void rotvecFromMatrix(){
 		// this assumes the rotation matrix is populated with the correct entries
@@ -609,7 +928,7 @@ class AHRS{
 		// this performs the exponential operation on the contents of the exponential map and stores them in the cache
 		double angle = sqrt(source[0]*source[0] + source[1]*source[1] + source[2]*source[2]);
 		if(angle < 1e-4){
-			fill(target.begin(), target.end(), {0.0, 0.0, 0.0});
+			for(int i = 0; i < target.size(); i++) for(int j = 0; j < target[0].size(); j++) target[i][j] = 0.0;
 			target[0][0] = 1.0; target[1][1] = 1.0; target[2][2] = 1.0;
 		}
 		std::vector <double> axis = {source[0]/angle, source[1]/angle, source[2]/angle};
@@ -928,9 +1247,9 @@ class RCInterface{
 	
 	void poll(int &c1v, int &c2v, int &c3v, int &c4v, int &c5v){
 		if(crsf_poll(&rc)){
-			ESP_LOGI("CHANNEL VALUES READ!",
-                     "CH1=%u CH2=%u CH3=%u CH4=%u AUX1=%u AUX2=%u AUX3=%u AUX4=%u",
-                     rc.ch[0], rc.ch[1], rc.ch[2], rc.ch[3], rc.ch[4]);
+//			ESP_LOGI("CHANNEL VALUES READ!",
+//                     "CH1=%u CH2=%u CH3=%u CH4=%u AUX1=%u AUX2=%u AUX3=%u AUX4=%u",
+//                     rc.ch[0], rc.ch[1], rc.ch[2], rc.ch[3], rc.ch[4]);
 			c1v = rc.ch[0]; c2v = rc.ch[1]; c3v = rc.ch[2]; c4v = rc.ch[3]; c5v = rc.ch[4];
 		}
 		uint64_t now = esp_timer_get_time();
@@ -940,48 +1259,114 @@ class RCInterface{
 		}
 	}
 	void calibrate(){
-		printf("Set the thrust to min");
+		printf("Set the thrust to min\n");
+		int minima = 1000, maxima=2000;
 		vTaskDelay(pdMS_TO_TICKS(5000));
-		int a,b,c,d,e;
-		this->poll(a,b,c,d,e);
-		this->minPwms[0] = a;
-		printf("Set the thrust to max");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->maxPwms[0] = a;
-		printf("Set the yaw to min");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->minPwms[1] = b;
-		printf("Set the yaw to max");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->maxPwms[1] = b;
-		printf("Set the pitch to min");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->minPwms[2] = c;
-		printf("Set the pitch to max");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->maxPwms[2] = c;
-		printf("Set the roll to min");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->minPwms[3] = d;
-		printf("Set the roll to max");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->maxPwms[3] = d;
+		int a=0,b=0,c=0,d=0,e=0;
+		int64_t start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(b,c,a,d,e);
+			minima = std::min(minima, a);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->minPwms[2] = minima;
+		printf("Min thrust %d\n", minima);
+		printf("Set the thrust to max\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(b,c,a,d,e);
+			maxima= std::max(maxima, a);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->maxPwms[2] = maxima;
+		printf("Max thrust %d\n", maxima);
 		
-		printf("Set the arming switch to min");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->minPwms[4] = e;
-		printf("Set the arming switch to max");
-		vTaskDelay(pdMS_TO_TICKS(5000));
-		this->poll(a,b,c,d,e);
-		this->maxPwms[4] = e;
+		minima = 2000; maxima=1000;
+		
+		printf("Set the yaw to min\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(d,c,a,b,e);
+			minima = std::min(minima, b);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->minPwms[3] = minima;
+		printf("Min yaw %d\n", minima);
+		printf("Set the yaw to max\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(d,c,a,b,e);
+			maxima= std::max(maxima, b);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->maxPwms[3] = maxima;
+		printf("Max Yaw %d\n", maxima);
+		
+		maxima = 1000; minima = 2000;
+		
+		printf("Set the pitch to min\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(a,c,d,b,e);
+			minima = std::min(minima, c);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->minPwms[1] = minima;
+		printf("Pitch min %d\n", minima);
+		
+		printf("Set the pitch to max\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(a,c,d,b,e);
+			maxima= std::max(maxima, c);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->maxPwms[1] = maxima;
+		printf("Max Pitch %d\n", maxima);
+		
+		maxima = 1000; minima = 2000;
+		
+		printf("Set the roll to min\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(d,c,a,b,e);
+			minima = std::min(minima, d);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->minPwms[0] = minima;
+		printf("Roll min %d\n", minima);
+		
+		printf("Set the roll to max\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(d,c,a,b,e);
+			maxima= std::max(maxima, d);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->maxPwms[0] = maxima;
+		printf("Max Roll %d\n", maxima);
+		
+		
+		minima = 2000; maxima = 1000;
+		printf("Set the arming switch to min\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(a,c,d,b,e);
+			minima = std::min(minima, e);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->minPwms[4] = minima;
+		printf("Disarmed pwm %d\n", minima);
+		
+		printf("Set the arming switch to max\n");
+		start_time = esp_timer_get_time();
+		while(esp_timer_get_time() - start_time < 7000000){
+			this->poll(a,c,d,b,e);
+			maxima= std::max(maxima, e);
+			vTaskDelay(pdMS_TO_TICKS(50));
+		}
+		this->maxPwms[4] = maxima;
+		printf("Arming pwm %d\n", maxima);
 		
 		for(int i = 0; i < 5; i++){
 			this->rcCenters[i] = (this->minPwms[i] + this->maxPwms[i])/2;
@@ -1009,7 +1394,6 @@ class Drone{
 	bool armed = false;
 	uint32_t escmin = 1000;
 	uint32_t escmax = 2000;
-	
 	double maxRoll = PI/4.0;
 	double maxPitch = PI/4.0;
 	double maxYawRate = PI/4.0;
@@ -1017,8 +1401,8 @@ class Drone{
 	bool haveParams = true;	
 	
 	
-	Drone():
-		AHorse(),
+	Drone(i2c_master_dev_handle_t i1, i2c_master_dev_handle_t  i2):
+		AHorse(i1, i2),
 		Commander(pointer),
 		Radio(),
 		escs()
@@ -1069,6 +1453,12 @@ class Drone{
 		
 		std::array<gpio_num_t, ESCInterface::NUM_ESCS> pins = {GPIO_NUM_11, GPIO_NUM_12, GPIO_NUM_13, GPIO_NUM_14};
 		escs.init(pins);
+		
+		if(AHorse.initialMagneticVector[0] == 0.0 && AHorse.initialMagneticVector[1] == 0.0 && AHorse.initialMagneticVector[2] == 0.0){
+			printf("Place the drone perfectly level and in the expected initial heading direction. The Vehicle will wait 8 seconds for you to do this.\n");
+			vTaskDelay(pdMS_TO_TICKS(8000));
+			AHorse.updatePipeline();
+		}
 	}
 
 	
@@ -1099,10 +1489,10 @@ class Drone{
 		double range1 = (double)(Radio.maxPwms[1] - Radio.minPwms[1]);
 		double range2 = (double)(Radio.maxPwms[2] - Radio.minPwms[2]);
 		double range3 = (double)(Radio.maxPwms[3] - Radio.minPwms[3]);
-		double thrust = ((double)(c1 - Radio.minPwms[0]))/(range0);
-		double yaw = ((double)(c2 - Radio.rcCenters[1]))/(0.5*range1);
-		double pitch = ((double)(c3 - Radio.rcCenters[2]))/(0.5*range2);
-		double roll = ((double)(c4 - Radio.rcCenters[3]))/(0.5*range3);
+		double thrust = ((double)(c3 - Radio.minPwms[2]))/(range2);
+		double yaw = ((double)(c4 - Radio.rcCenters[3]))/(0.5*range3);
+		double pitch = ((double)(c2 - Radio.rcCenters[1]))/(0.5*range1);
+		double roll = ((double)(c1 - Radio.rcCenters[0]))/(0.5*range0);
 		yaw *= maxYawRate; roll *= maxRoll; pitch *= maxPitch;
 		Commander.generateCommandsPrincipledWay(thrust, roll, pitch, yaw);
 		uint32_t motor1 = (uint32_t)(escmin + Commander.issuedControl[0]*((double)(escmax - escmin)));
@@ -1121,15 +1511,83 @@ class Drone{
 	
 };
 
+
+
+// we gon test components one by one. Lets start with the IMUs
+
 extern "C" void app_main(void){
-    i2c_master_init();
-    vTaskDelay(pdMS_TO_TICKS(100));
-	Drone Dronacharya;
-	printf("Wireframe Complete!");
-	vTaskDelay(pdMS_TO_TICKS(1000));	
-	while(1){	
-		Dronacharya.run_loop();
-		vTaskDelay(pdMS_TO_TICKS(10)); // 100Hz
-	}
 	
+//	i2c_master_bus_config_t bus_cfg = {};
+//    bus_cfg.i2c_port = I2C_NUM_0;
+//    bus_cfg.sda_io_num = (gpio_num_t)I2C_MASTER_SDA_IO;
+//    bus_cfg.scl_io_num = (gpio_num_t)I2C_MASTER_SCL_IO;
+//    bus_cfg.clk_source = I2C_CLK_SRC_DEFAULT;
+//    bus_cfg.glitch_ignore_cnt = 7;
+//    bus_cfg.flags.enable_internal_pullup = true;
+//
+//    i2c_master_bus_handle_t bus_handle = nullptr;
+//    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
+////
+    // 2) add MPU6500 device
+//    i2c_device_config_t mpu_cfg = {};
+//    mpu_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+//    mpu_cfg.device_address = 0x68;
+//    mpu_cfg.scl_speed_hz = I2C_MASTER_FREQ_HZ;
+//
+//    i2c_master_dev_handle_t mpu_dev = nullptr;
+//    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &mpu_cfg, &mpu_dev));
+//
+//    // 3) add ICM20948 device
+//    i2c_device_config_t icm_cfg = {};
+//    icm_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+//    icm_cfg.device_address = 0x69;
+//    icm_cfg.scl_speed_hz = I2C_MASTER_FREQ_HZ;
+//
+//    i2c_master_dev_handle_t icm_dev = nullptr;
+//    ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &icm_cfg, &icm_dev));
+//
+//    vTaskDelay(pdMS_TO_TICKS(200)); // sensor settle time
+//
+//    // 4) pass device handles into your top-level class
+//    AHRS horsey(mpu_dev, icm_dev);
+//	vTaskDelay(pdMS_TO_TICKS(1000));
+//	float ax = 0.0,ay = 0.0,az = 0.0 ,gx = 0.0 ,gy = 0.0,gz = 0.0 ,mx = 0.0 ,my = 0.0 ,mz = 0.0;
+//	horsey.imu.testComms(ax, ay, az, gx, gy, gz, mx, my, mz, 1);
+//	printf("Datastic %f %f %f %f %f %f %f %f %f\n", ax, ay, az, gx, gy, gz, mx, my, mz);
+////	vTaskDelay(pdMS_TO_TICKS(10000));
+//	horsey.imu.calibrateAll();
+//	horsey.printCalibration();
+//	horsey.updatePipeline();
+//	horsey.rotvecFromMatrix();
+
+	// Radio calibration and testing 
+	RCInterface Radio;
+	Radio.calibrate();
+	
+	while(true){
+		int c1,c2,c3,c4,c5;
+		// c1 is roll
+		// c2 is pitch 
+		// c3 is thrust
+		// c4 is yaw
+		// c5 is arming
+				
+		Radio.poll(c1,c2,c3,c4,c5);
+		printf("Thrust: %d Roll %d Pitch %d Yaw %d", c3, c1, c2, c4);
+		printf("HELPPPPP\n");
+//		printf("%f %f %f\n", horsey.rotvec[0], horsey.rotvec[1], horsey.rotvec[2]);
+		vTaskDelay(pdMS_TO_TICKS(50));
+	}
+	vTaskDelay(pdMS_TO_TICKS(200));
+
+
+//
+//	Drone Dronacharya;
+//	printf("Wireframe Complete!");
+//	vTaskDelay(pdMS_TO_TICKS(1000));	
+//	while(1){	
+//		Dronacharya.run_loop();
+//		vTaskDelay(pdMS_TO_TICKS(10)); // 100Hz
+//	}
+//	
 }
